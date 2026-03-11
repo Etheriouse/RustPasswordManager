@@ -67,6 +67,10 @@ impl Vault {
         }
     }
 
+    pub fn is_a_master(&self) -> bool {
+        return self.hash.eq(&String::new());
+    }
+
     pub fn set_master(&mut self, master: String) -> () {
         crypto::generate_salt(&mut self.salt_key);
         let mut rng = OsRng;
@@ -122,18 +126,25 @@ impl Vault {
         crypto::generate_salt(&mut salt);
         return salt;
     }
+
+    pub fn generate_random_password(&self) -> String {
+        return "".to_string();
+    }
 }
 
 
 static FILENAME: &str = "vault.bin";
 
 #[pyfunction]
-pub fn load_vault(vault_password: String) -> PyResult<(Vault, [u8; 16])> {
+pub fn load_vault(path: String, vault_password: String) -> PyResult<(Vault, [u8; 16])> {
     let mut vault: Vault = Vault::new();
     let mut salt: [u8; 16] = [0u8; 16];
 
-    if Path::new(FILENAME).exists() {
-        let table = fs::read(FILENAME).unwrap();
+    let vault_path = Path::new(&path).join(FILENAME);
+
+   
+    if vault_path.exists() {
+        let table = fs::read(vault_path).unwrap();
         salt = table[..16].try_into().unwrap();
         let nonce: [u8; 12] = table[16..28].try_into().unwrap();
         let data_crypt = &table[28..];
@@ -146,7 +157,10 @@ pub fn load_vault(vault_password: String) -> PyResult<(Vault, [u8; 16])> {
 }
 
 #[pyfunction]
-pub fn save_vault(vault: &Vault, vault_password: String, salt: [u8; 16]) {
+pub fn save_vault(path: String, vault: &Vault, vault_password: String, salt: [u8; 16]) {
+    
+    let vault_path = Path::new(&path).join(FILENAME);
+
     let data_serialized = bincode::serialize(&vault).unwrap();
     let (data_encrypt, nonce_2) =
         crypto::encrypt_data(&vault_password.as_str(), &data_serialized, salt);
@@ -156,5 +170,5 @@ pub fn save_vault(vault: &Vault, vault_password: String, salt: [u8; 16]) {
     ouput.extend_from_slice(&nonce_2);
     ouput.extend_from_slice(&data_encrypt);
 
-    fs::write(FILENAME, ouput).unwrap();
+    fs::write(vault_path, ouput).unwrap();
 }
