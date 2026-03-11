@@ -208,47 +208,153 @@ class PasswordManager(QWidget):
                 
 
 class PasswordDialog(QDialog):
-    def __init__(self):
+    def __init__(self, title):
         super().__init__()
-        self.setWindowTitle("🔒 Mot de passe")
-        self.setFixedSize(300, 120)
+
+        self.setWindowTitle("🔐 Password")
+        self.setFixedSize(350, 150)
+
+        self.setStyleSheet("""
+            QWidget { background-color: #1e1e2f; color: #fff; font-family: 'Segoe UI'; }
+            QPushButton { background-color: #5c6bc0; color: #fff; border-radius: 5px; padding: 5px; }
+            QPushButton:hover { background-color: #7986cb; }
+            QLineEdit { padding: 5px; border-radius: 5px; border: 1px solid #555; background-color: #2e2e44; color: #fff; }
+        """)
 
         layout = QVBoxLayout()
 
-        layout.addWidget(QLabel("Entrez le mot de passe :"))
+        label = QLabel(title)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setFont(QFont("Segoe UI", 11))
+        layout.addWidget(label)
 
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self.password_input)
+        
+        self.label_error = QLabel("")
+        self.label_error.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_error.setFont(QFont("Segoe UI", 11))
+        layout.addWidget(self.label_error)
+
+        buttons = QHBoxLayout()
 
         self.ok_btn = QPushButton("OK")
-        self.ok_btn.clicked.connect(self.check_password)
-        layout.addWidget(self.ok_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        buttons.addWidget(self.ok_btn)
+        buttons.addWidget(cancel_btn)
+
+        layout.addLayout(buttons)
 
         self.setLayout(layout)
-        self.correct = False
 
-    def check_password(self):
-        if self.password_input.text() == "pass":  # exemple
-            self.correct = True
-            self.accept()  # ferme la fenêtre et renvoie QDialog.Accepted
+    def get_password(self):
+        return self.password_input.text()
+    
+    def set_message(self, str):
+        self.label_error.setText(str)
+        self.password_input.clear()
+    
+def try_vault_pass(path_):
+    vault_dialog = PasswordDialog("Enter vault password")
+    vault_dialog.setModal(True)
+    vault_dialog.show()
+    app.processEvents()
+
+    try_vault_pwd = 3
+    success_vault = False
+    vault_pass = ""
+
+    vault = None
+    salt = None
+    
+    def tmp():
+        nonlocal try_vault_pwd, success_vault, vault, salt, vault_pass
+        vault_pass = vault_dialog.get_password()
+        try:
+            vault, salt = vault_rs.load_vault(path_, vault_pass)
+            success_vault = True
+            vault_dialog.accept()  # ferme le dialogue si correct
+        except BaseException:
+            try_vault_pwd-=1
+            if try_vault_pwd <= 0:
+                vault_dialog.reject()
+            else:
+                vault_dialog.set_message(f"Wrong password, {try_vault_pwd} tries left")
+
+    vault_dialog.ok_btn.clicked.connect(tmp)
+    #vault_dialog.password_input.returnPressed.connect(tmp)
+    if vault_dialog.exec() != QDialog.DialogCode.Accepted or vault is None:
+        sys.exit(-1)
+
+    return vault, salt, vault_pass
+
+def try_master_pwd(vault):
+    master_dialog = PasswordDialog("Enter master password")
+    master_dialog.setModal(True)
+    master_dialog.show()
+    app.processEvents()
+    
+    try_master_pwd = 3
+    succes_master = False
+    master = ""
+    
+    def tmp():
+        nonlocal try_master_pwd, succes_master, vault, master
+        master = master_dialog.get_password()
+        if vault.verify_master(master):
+            succes_master = True
+            master_dialog.accept() 
         else:
-            QMessageBox.warning(self, "Erreur", "Mot de passe incorrect !")
-            self.password_input.clear()
+            try_master_pwd-=1
+            if try_master_pwd <= 0:
+                master_dialog.reject()
+            else:
+                master_dialog.set_message(f"Wrong password, {try_master_pwd} tries left")
 
+    master_dialog.ok_btn.clicked.connect(tmp)
+    #vault_dialog.password_input.returnPressed.connect(tmp)
+    if master_dialog.exec() != QDialog.DialogCode.Accepted or not succes_master:
+        sys.exit(-1)
+
+    return master
+
+def set_master_pwd(vault):
+    master_dialog = PasswordDialog("Set master password")
+    master_dialog.setModal(True)
+    master_dialog.show()
+    app.processEvents()
+    
+    master = ""
+    
+    def tmp():
+        nonlocal master, vault
+        master = master_dialog.get_password()
+        vault.set_master(master)
+        master_dialog.accept() 
+        
+    master_dialog.ok_btn.clicked.connect(tmp)
+    if master_dialog.exec() != QDialog.DialogCode.Accepted:
+        sys.exit(-1)
+
+    return master
+       
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    path_ = get_user_data_dir("dev_rust_passman")
+    vault, salt, vault_pass = try_vault_pass(path_)
+    master = ""
     
-    pwd_dialog = PasswordDialog()
-    if pwd_dialog.exec() == QDialog.Accepted:
-        path_ = get_user_data_dir("dev_rust_passman")
-        (vault, salt) = vault_rs.load_vault(path_, "pass")
-    
-        window = PasswordManager()
-        window.show()
-        app.exec()
-    
-        vault_rs.save_vault(path_, vault, "pass", salt)
-    else:
-        print("Mot de passe non valide, fermeture de l'application.")
-    
+    if not vault.is_a_master():
+        master = set_master_pwd(vault)
+    else:    
+        master = try_master_pwd(vault)
+
+    print(master)    
+    window = PasswordManager()
+    window.show()
+    app.exec()
+    vault_rs.save_vault(path_, vault, vault_pass, salt)

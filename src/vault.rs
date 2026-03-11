@@ -3,8 +3,10 @@ use argon2::{
     Argon2, PasswordVerifier,
     password_hash::{PasswordHasher, SaltString},
 };
+use chacha20poly1305::aead::Error;
 use chacha20poly1305::aead::OsRng;
 use pyo3::{pyclass, pymethods, pymodule};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::{fs, path::Path};
 use serde::{Deserialize, Serialize};
@@ -68,7 +70,7 @@ impl Vault {
     }
 
     pub fn is_a_master(&self) -> bool {
-        return self.hash.eq(&String::new());
+        return !self.hash.eq(&String::new());
     }
 
     pub fn set_master(&mut self, master: String) -> () {
@@ -90,9 +92,10 @@ impl Vault {
             .is_ok();
     }
 
-    pub fn lock(&mut self, master: &str, data: Data, name: String) -> () {
+    pub fn lock(&mut self, master: &str, data: Data, name: String) -> PyResult<()> {
         let json = serde_json::to_string(&data).unwrap();
-        let (encrypt, nonce_b) = crypto::encrypt_data(master, &json.as_bytes(), self.salt_key);
+        let (encrypt, nonce_b) = crypto::encrypt_data(master, &json.as_bytes(), self.salt_key)
+        .map_err(|_| PyRuntimeError::new_err("Encryption of data failed"))?;
         self.entry.insert(
             name,
             Entry {
@@ -100,21 +103,25 @@ impl Vault {
                 locked_data: encrypt,
             },
         );
+        Ok(())
     }
 
-    pub fn unlock(&self, master: &str, which: String) -> Data {
+    pub fn unlock(&self, master: &str, which: String) -> PyResult<Data> {
         let entry = match self.entry.get(&which) {
             Some(e) => e,
-            None => panic!("Entry not found"),
+            None => return Err(PyRuntimeError::new_err("Entry not found")),
         };
         let decrypt = crypto::decrypt_data(
             master,
             entry.locked_data.clone(),
             entry.nonce_b,
             self.salt_key,
-        );
-        let str = String::from_utf8(decrypt).unwrap();
-        return serde_json::from_str(&str).unwrap();
+        )
+        .map_err(|_| PyRuntimeError::new_err("Wrong master password"))?;
+        let str = String::from_utf8(decrypt).map_err(|_| PyRuntimeError::new_err("Can't parse data to string"))?;
+        let data: Data = serde_json::from_str(&str)
+        .map_err(|_| PyRuntimeError::new_err("JSON parse error"))?;
+        Ok(data)
     }
 
     pub fn get_name_password(&self) -> Vec<String> {
@@ -144,31 +151,42 @@ pub fn load_vault(path: String, vault_password: String) -> PyResult<(Vault, [u8;
 
    
     if vault_path.exists() {
-        let table = fs::read(vault_path).unwrap();
-        salt = table[..16].try_into().unwrap();
-        let nonce: [u8; 12] = table[16..28].try_into().unwrap();
+        let table = fs::read(&vault_path)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        salt = table[..16]
+            .try_into()
+            .map_err(|_| PyRuntimeError::new_err("invalid salt"))?;
+        let nonce: [u8; 12] = table[16..28]
+            .try_into()
+            .map_err(|_| PyRuntimeError::new_err("invalid nonce"))?;
         let data_crypt = &table[28..];
 
-        let data = crypto::decrypt_data(&vault_password.as_str(), data_crypt.to_vec(), nonce, salt);
-        vault = bincode::deserialize(&data).unwrap();
+        let data = crypto::decrypt_data(&vault_password.as_str(), data_crypt.to_vec(), nonce, salt)
+        .map_err(|_| PyRuntimeError::new_err("Wrong vault password"))?;
+        vault = bincode::deserialize(&data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     }
 
     return Ok((vault, salt));
 }
 
 #[pyfunction]
-pub fn save_vault(path: String, vault: &Vault, vault_password: String, salt: [u8; 16]) {
+pub fn save_vault(path: String, vault: &Vault, vault_password: String, salt: [u8; 16]) -> PyResult<()> {
     
     let vault_path = Path::new(&path).join(FILENAME);
 
-    let data_serialized = bincode::serialize(&vault).unwrap();
+    let data_serialized =
+        bincode::serialize(vault).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let (data_encrypt, nonce_2) =
-        crypto::encrypt_data(&vault_password.as_str(), &data_serialized, salt);
-    let mut ouput = Vec::new();
+        crypto::encrypt_data(&vault_password.as_str(), &data_serialized, salt)
+        .map_err(|_| PyRuntimeError::new_err("Encryption of vault failed"))?;
+    let mut output = Vec::new();
 
-    ouput.extend_from_slice(&salt);
-    ouput.extend_from_slice(&nonce_2);
-    ouput.extend_from_slice(&data_encrypt);
+    output.extend_from_slice(&salt);
+    output.extend_from_slice(&nonce_2);
+    output.extend_from_slice(&data_encrypt);
 
-    fs::write(vault_path, ouput).unwrap();
+    fs::write(vault_path, output)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    return Ok(())
 }
